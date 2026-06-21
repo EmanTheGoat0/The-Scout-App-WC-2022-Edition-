@@ -14,15 +14,12 @@ st.set_page_config(page_title="The Scout AI", layout="wide")
 st.title("⚽ The Scout: AI Player Similarity Engine")
 st.markdown("Analyzing aggregated data from **the entire 2022 FIFA World Cup**.")
 
-# --- PHASE 1: LOAD DATA (Optimized) ---
-@st.cache_data(show_spinner=False)
+# --- PHASE 1: LOAD DATA ---
+@st.cache_resource(show_spinner=False)
 def load_tournament_data():
-    # TIP: If you have a CSV saved locally in your project folder, 
-    # loading that will take < 1 second compared to 60+ seconds for the API.
     if os.path.exists("world_cup_data.csv"):
-        return pd.read_csv("world_cup_data.csv")
+        return pd.read_csv("world_cup_data.csv", low_memory=False)
     
-    # Fallback to API if CSV doesn't exist
     matches = sb.matches(competition_id=43, season_id=106)
     match_ids = matches['match_id'].tolist()
     
@@ -30,20 +27,31 @@ def load_tournament_data():
     progress_bar = st.progress(0, text="Downloading match data...")
     
     for i, mid in enumerate(match_ids):
-        all_events.append(sb.events(match_id=mid))
+        match_df = sb.events(match_id=mid)
+        
+        # CHANGE 2: ONLY keep essential columns to avoid crashing the cache
+        cols = ['id', 'type', 'pass_outcome', 'player', 'team', 'location', 'pass_end_location']
+        match_df = match_df[[c for c in cols if c in match_df.columns]]
+        
+        # Safely force coordinates to strings (leaving NaNs alone)
+        if 'location' in match_df.columns:
+            match_df['location'] = match_df['location'].apply(lambda x: str(x) if isinstance(x, list) else x)
+        if 'pass_end_location' in match_df.columns:
+            match_df['pass_end_location'] = match_df['pass_end_location'].apply(lambda x: str(x) if isinstance(x, list) else x)
+            
+        all_events.append(match_df)
         progress_bar.progress((i + 1) / len(match_ids), text=f"Match {i+1} of {len(match_ids)}...")
         
     progress_bar.empty()
     df = pd.concat(all_events, ignore_index=True)
     
-    # Save to CSV so you never have to download this again!
     df.to_csv("world_cup_data.csv", index=False)
     return df
 
 events = load_tournament_data()
 
-# --- PHASE 2: FEATURE ENGINEERING (Aggregated across tournament) ---
-@st.cache_data
+# --- PHASE 2: FEATURE ENGINEERING ---
+@st.cache_resource
 def engineer_features(_events_df):
     passes = _events_df[_events_df['type'] == 'Pass'].copy()
     shots = _events_df[_events_df['type'] == 'Shot'].copy()
@@ -96,10 +104,17 @@ with col2:
     player_passes = player_passes.dropna(subset=['location', 'pass_end_location'])
     
     if len(player_passes) > 0:
-        # If data was loaded from CSV, lists became strings. This converts them back.
+        
+        # Safe evaluation function to guarantee it never crashes on bad strings
+        def safe_eval(val):
+            try:
+                return ast.literal_eval(val)
+            except:
+                return [0, 0]
+
         if isinstance(player_passes['location'].iloc[0], str):
-            player_passes['location'] = player_passes['location'].apply(ast.literal_eval)
-            player_passes['pass_end_location'] = player_passes['pass_end_location'].apply(ast.literal_eval)
+            player_passes['location'] = player_passes['location'].apply(safe_eval)
+            player_passes['pass_end_location'] = player_passes['pass_end_location'].apply(safe_eval)
 
         player_passes['x'] = player_passes['location'].apply(lambda loc: loc[0])
         player_passes['y'] = player_passes['location'].apply(lambda loc: loc[1])
